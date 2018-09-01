@@ -1,0 +1,23 @@
+{
+    "timezone": {
+        "id": "33",
+        "offset": "1",
+        "useDaylightTime": "1"
+    },
+    "alarm": {
+        "active": "false",
+        "time": "08:00:00",
+        "days": "Mon,Tue,Wed,Thu,Fri",
+	"sunrise_leds": "true"
+    },
+    "mqtt": {
+        "server": "",
+        "topic" : "",
+        "id": ""
+    },
+    "weather": {
+	"api_key": "",
+	"country": "",
+	"city": ""
+    }
+}

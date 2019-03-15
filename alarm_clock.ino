@@ -12,20 +12,20 @@
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include "Adafruit_LEDBackpack.h"
+#include "wifi_credentials.h"
 
 #include <ESP8266HTTPClient.h>
 #if defined(ESP8266)
 #include <Ticker.h>
 #endif
-#include "WundergroundClient.h"
+
+#include <OpenWeatherMap.h>
 #include "alarm_clock_fonts.h"
 #include "alarm_clock_images.h"
 #include "SSD1306Wire.h"
 #include "OLEDDisplayUi.h"
 
-// WIFI SETUP
-const char *ssid     = "";
-const char *password = "";
+const char *nodename    = "esp8266-weather";
 
 // Interval betwen data update
 const int UPDATE_INTERVAL_SECS = 10 * 60; // Update every 10 minutes
@@ -93,7 +93,7 @@ struct mqtt_config {
 mqtt_config mqtt = {"", "", "", "OFF"};
 
 
-// Weather underground vars
+// Weather vars
 struct weather_config {
   String apikey;  // Weather underground API key.
   String country; // Two character ISO country code
@@ -105,6 +105,26 @@ struct weather_config {
 
 weather_config weather = {"", "", "", "EN", true, "--"};
 
+struct weather_cond {
+  String description; //Current weather conditions description
+  String currentTemp; //Current weather temperature
+  String icon;        //Current weather icon
+};
+
+weather_cond wcond = {"","",""};
+
+struct weather_forecast {
+  String date;
+  String description;
+  float max_temp;
+  float min_temp;
+  String icon;
+};
+
+weather_forecast wforecast[3];
+
+OWMconditions      owCC;
+OWMfiveForecast    owF5;
 
 // flag changed in the ticker function every 10 minutes
 bool readyForWeatherUpdate = false;
@@ -163,7 +183,7 @@ OLEDDisplayUi   ui( &display );
 // NTP Client init and set to 60 seconds update interval and
 NTPClient timeClient(ntpUDP, "europe.pool.ntp.org", 0, 60000);
 // Weatherunderground init
-WundergroundClient wunderground(weather.is_metric);
+// WundergroundClient wunderground(weather.is_metric);
 
 
 // OLED DISPLAY AND FRAMES SETUP
@@ -221,7 +241,7 @@ void setup() {
   display.setTextAlignment(TEXT_ALIGN_CENTER);
   display.setContrast(255);
 
-  WiFi.begin(ssid, password);
+  WiFi.begin(wifi_ssid, wifi_password);
 
   int counter = 0;
   while ( WiFi.status() != WL_CONNECTED ) {
@@ -367,23 +387,23 @@ void setup() {
   Serial.println("HTTP server started");
 
   // Let's connect to MQTT
-  client.setOptions(60, true, 1000);
-  client.begin(mqtt.server.c_str(), net);
-  while (!client.connect(mqtt.id.c_str()))
-  {
-    Serial.print(".");
-    delay(1000);
+  if(mqtt.server.c_str() != ""){
+    client.setOptions(60, true, 1000);
+    client.begin(mqtt.server.c_str(), net);
+    while (!client.connect(mqtt.id.c_str()))
+    {
+      Serial.print(".");
+      delay(1000);
+    }
+    client.onMessage(messageReceived);
+    Serial.println("MQTT server connected.");
   }
-  client.onMessage(messageReceived);
-
-  Serial.println("MQTT server connected.");
-
 }
 
 void loop() {
   currentMillis = millis();
   server.handleClient();
-  
+
   if (digitalRead(lightPin) == HIGH) {
     process_ledButton();
   }
@@ -522,7 +542,7 @@ void loop() {
       if ((timeClient.getFormattedTime().substring(0, 5) == ALARM.time.substring(0, 5)) || (timeClient.getFormattedTime().substring(0, 5) == ALARM.rescheduled.substring(0, 5))) {
         // Now we're sure it only sounds then it really should
         tone(buzzerPin, 880, period / 2);
-      }else{
+      } else {
         alarmRing == 0;
         alarmTimer == 0;
         noTone(buzzerPin);
@@ -564,7 +584,7 @@ void loop() {
     updateData(&display);
   }
 
-  //is it time to update? if so, let's go! 
+  //is it time to update? if so, let's go!
   if (readyForWeatherUpdate && ui.getUiState()->frameState == FIXED) {
     updateData(&display);
   }
@@ -832,14 +852,69 @@ void updateData(OLEDDisplay *display) {
   }
   drawProgress(display, 30, "Updating time...");
   timeClient.update();
+
+  if (isSummertime()) {
+    timeClient.setTimeOffset((tz.offset.toInt() + tz.daylight.toInt()) * 3600);
+  } else {
+    timeClient.setTimeOffset(tz.offset.toInt() * 3600);
+  }
+
   drawProgress(display, 60, "Updating conditions...");
-  wunderground.updateConditions(weather.apikey, weather.lang, weather.country, weather.city);
+  //wunderground.updateConditions(weather.apikey, weather.lang, weather.country, weather.city);
+  currentConditions();
   drawProgress(display, 90, "Updating forecasts...");
-  wunderground.updateForecast(weather.apikey, weather.lang, weather.country, weather.city);
+  //wunderground.updateForecast(weather.apikey, weather.lang, weather.country, weather.city);
+  fiveDayFcast();
   weather.last_update = timeClient.getFormattedTime();
   readyForWeatherUpdate = false;
   drawProgress(display, 100, "Done...");
   delay(500);
+}
+
+void currentConditions(void) {
+  OWM_conditions *ow_cond = new OWM_conditions;
+  owCC.updateConditions(ow_cond, weather.apikey, weather.country, weather.city, "metric");
+  wcond.description = ow_cond->description;
+  wcond.currentTemp = ow_cond->temp;
+  wcond.icon = getMeteoconIcon(ow_cond->icon);
+  delete ow_cond;
+}
+
+void fiveDayFcast(void) {
+  OWM_fiveForecast *ow_fcast5 = new OWM_fiveForecast[40];
+  byte entries = owF5.updateForecast(ow_fcast5, 40, weather.apikey, weather.country, weather.city, "metric");
+  Serial.print("Entries: "); Serial.println(entries+1);
+  entries = 24;
+  byte day_index = 0;
+  String previous_date = String(dateTime(ow_fcast5[0].dt)).substring(6, 20);
+  wforecast[day_index].max_temp = 0;
+  wforecast[day_index].min_temp = 0;
+  for (byte i = 0; i <= entries; ++i) {
+      if(previous_date == String(dateTime(ow_fcast5[i].dt)).substring(6, 20)){
+        // Let's add values to see the maximum/minimum values
+        if(wforecast[day_index].max_temp < ow_fcast5[i].t_max.toFloat()){
+          wforecast[day_index].max_temp = ow_fcast5[i].t_max.toFloat();
+        }
+        if(wforecast[day_index].min_temp < ow_fcast5[i].t_min.toFloat()){
+          wforecast[day_index].min_temp = ow_fcast5[i].t_min.toFloat();
+        }
+
+        wforecast[day_index].date = weekDay(ow_fcast5[i].dt); // String(dateTime(ow_fcast5[i].dt)).substring(6, 20);
+        wforecast[day_index].description = ow_fcast5[i].description;
+        wforecast[day_index].icon = getMeteoconIcon(ow_fcast5[i].icon);
+      }else{
+        // Ok, let's summarize and finish processing
+        day_index = day_index + 1;
+        if(day_index >= 3) { // If we already have 3 days, we can finish processing by forcing the entries index
+          i = 25;
+        }else{
+          wforecast[day_index].max_temp = 0;
+          wforecast[day_index].min_temp = 0;
+        }
+      }
+      previous_date = String(dateTime(ow_fcast5[i].dt)).substring(6, 20);
+  }
+  delete[] ow_fcast5;
 }
 
 
@@ -859,15 +934,15 @@ void drawDateTime(OLEDDisplay *display, OLEDDisplayUiState* state, int16_t x, in
 void drawCurrentWeather(OLEDDisplay *display, OLEDDisplayUiState* state, int16_t x, int16_t y) {
   display->setFont(ArialMT_Plain_10);
   display->setTextAlignment(TEXT_ALIGN_LEFT);
-  display->drawString(60 + x, 5 + y, wunderground.getWeatherText());
+  display->drawString(60 + x, 5 + y, wcond.description);
 
   display->setFont(ArialMT_Plain_24);
-  String temp = wunderground.getCurrentTemp() + "°C";
+  String temp = wcond.currentTemp + "°C";
   display->drawString(60 + x, 15 + y, temp);
   int tempWidth = display->getStringWidth(temp);
 
   display->setFont(Meteocons_Plain_42);
-  String weatherIcon = wunderground.getTodayIcon();
+  String weatherIcon = wcond.icon;
   int weatherIconWidth = display->getStringWidth(weatherIcon);
   display->drawString(32 + x - weatherIconWidth / 2, 05 + y, weatherIcon);
 }
@@ -875,22 +950,25 @@ void drawCurrentWeather(OLEDDisplay *display, OLEDDisplayUiState* state, int16_t
 
 void drawForecast(OLEDDisplay *display, OLEDDisplayUiState* state, int16_t x, int16_t y) {
   drawForecastDetails(display, x, y, 0);
-  drawForecastDetails(display, x + 44, y, 2);
-  drawForecastDetails(display, x + 88, y, 4);
+  drawForecastDetails(display, x + 44, y, 1);
+  drawForecastDetails(display, x + 88, y, 2);
 }
 
 void drawForecastDetails(OLEDDisplay *display, int x, int y, int dayIndex) {
   display->setTextAlignment(TEXT_ALIGN_CENTER);
   display->setFont(ArialMT_Plain_10);
-  String day = wunderground.getForecastTitle(dayIndex).substring(0, 3);
+  String day = wforecast[dayIndex].date;  // week_days[dayIndex]; 
+  String tmax = String((int) wforecast[dayIndex].max_temp);
+  String tmin = String((int) wforecast[dayIndex].min_temp); 
   day.toUpperCase();
   display->drawString(x + 20, y, day);
 
   display->setFont(Meteocons_Plain_21);
-  display->drawString(x + 20, y + 12, wunderground.getForecastIcon(dayIndex));
-
+  display->drawString(x + 20, y + 12, wforecast[dayIndex].icon); 
+  
   display->setFont(ArialMT_Plain_10);
-  display->drawString(x + 20, y + 34, wunderground.getForecastLowTemp(dayIndex) + "|" + wunderground.getForecastHighTemp(dayIndex));
+  display->drawString(x + 20, y + 34, tmax +"|"+ tmin); 
+  //display->drawString(x + 20, y + 34, " 20|11");
   display->setTextAlignment(TEXT_ALIGN_LEFT);
 }
 
@@ -901,7 +979,7 @@ void drawHeaderOverlay(OLEDDisplay *display, OLEDDisplayUiState* state) {
   display->setTextAlignment(TEXT_ALIGN_LEFT);
   display->drawString(0, 54, time);
   display->setTextAlignment(TEXT_ALIGN_RIGHT);
-  String temp = wunderground.getCurrentTemp() + "°C";
+  String temp = wcond.currentTemp + "°C"; 
   display->drawString(128, 54, temp);
   display->drawHorizontalLine(0, 52, 128);
 }
@@ -936,9 +1014,11 @@ void process_ledButton() {
     } else {
       Serial.print("Toggling the light...");
       // Let's toggle light
-      client.connect(mqtt.id.c_str());
-      mqtt.status = "ON";
-      client.publish(mqtt.topic, mqtt.status);
+      if(mqtt.server.c_str() != ""){
+        client.connect(mqtt.id.c_str());
+        mqtt.status = "ON";
+        client.publish(mqtt.topic, mqtt.status);
+      }
     }
   }
   last_interrupt_time = interrupt_time;
@@ -947,7 +1027,7 @@ void process_ledButton() {
 void WIFI_Connect() {
   WiFi.disconnect();
   delay(100);
-  WiFi.begin(ssid, password);
+  WiFi.begin(wifi_ssid, wifi_password);
   // Wait for connection
   for (int i = 0; i < 25; i++)  {
     if ( WiFi.status() != WL_CONNECTED ) {
@@ -967,3 +1047,38 @@ void WIFI_Connect() {
     ESP.restart();
   }
 }
+
+String getMeteoconIcon(String iconText) {
+  if (iconText == "01d") return "B";
+  if (iconText == "01n") return "B";
+  if (iconText == "02d") return "H";
+  if (iconText == "02n") return "H";
+  if (iconText == "03d") return "Y";
+  if (iconText == "03n") return "Y";
+  if (iconText == "04d") return "Y";
+  if (iconText == "04n") return "Y";
+  if (iconText == "09d") return "Q";
+  if (iconText == "09n") return "Q";
+  if (iconText == "10d") return "R";
+  if (iconText == "10n") return "R";
+  if (iconText == "11d") return "S";
+  if (iconText == "11n") return "S";
+  if (iconText == "13d") return "W";
+  if (iconText == "13n") return "W";
+  if (iconText == "50d") return "M";
+  if (iconText == "50n") return "M";
+}
+
+String dateTime(String timestamp) {
+  time_t ts = timestamp.toInt();
+  char buff[30];
+  sprintf(buff, "%02d:%02d %02d-%02d-%4d", hour(ts), minute(ts), day(ts), month(ts), year(ts));
+  return String(buff);
+}
+
+String weekDay(String timestamp){
+  long day = timestamp.toInt() / 86400L;
+  int day_of_the_week = (day + 4) % 7;
+  return week_days[day_of_the_week];
+}
+

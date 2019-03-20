@@ -887,15 +887,15 @@ void fiveDayFcast(void) {
   entries = 24;
   byte day_index = 0;
   String previous_date = String(dateTime(ow_fcast5[0].dt)).substring(6, 20);
-  wforecast[day_index].max_temp = 0;
-  wforecast[day_index].min_temp = 0;
+  wforecast[day_index].max_temp = -100;
+  wforecast[day_index].min_temp = 100;
   for (byte i = 0; i <= entries; ++i) {
       if(previous_date == String(dateTime(ow_fcast5[i].dt)).substring(6, 20)){
         // Let's add values to see the maximum/minimum values
         if(wforecast[day_index].max_temp < ow_fcast5[i].t_max.toFloat()){
           wforecast[day_index].max_temp = ow_fcast5[i].t_max.toFloat();
         }
-        if(wforecast[day_index].min_temp < ow_fcast5[i].t_min.toFloat()){
+        if(wforecast[day_index].min_temp > ow_fcast5[i].t_min.toFloat()){
           wforecast[day_index].min_temp = ow_fcast5[i].t_min.toFloat();
         }
 
@@ -908,8 +908,8 @@ void fiveDayFcast(void) {
         if(day_index >= 3) { // If we already have 3 days, we can finish processing by forcing the entries index
           i = 25;
         }else{
-          wforecast[day_index].max_temp = 0;
-          wforecast[day_index].min_temp = 0;
+          wforecast[day_index].max_temp = -100;
+          wforecast[day_index].min_temp = 100;
         }
       }
       previous_date = String(dateTime(ow_fcast5[i].dt)).substring(6, 20);
